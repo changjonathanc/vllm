@@ -55,6 +55,7 @@ from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
+    get_routed_experts_buffer_num_tokens,
 )
 from vllm.model_executor.layers.rotary_embedding import (
     MRotaryEmbedding,
@@ -6803,20 +6804,14 @@ class GPUModelRunner(
         )
         routed_experts_capturer = RoutedExpertsCapturer.create()
         self.routed_experts_attn_gid = self._get_attention_kv_cache_gid()
-        min_block_size = min(
-            [
-                group.kv_cache_spec.block_size
-                for group in self.kv_cache_config.kv_cache_groups
-            ]
-        )
-        num_groups = len(self.kv_cache_config.kv_cache_groups)
-        self.max_num_kv_tokens = (
-            self.kv_cache_config.num_blocks // num_groups
-        ) * min_block_size
         dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
         pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
-        if pcp_size * dcp_size > 1:
-            self.max_num_kv_tokens *= pcp_size * dcp_size
+        self.max_num_kv_tokens = get_routed_experts_buffer_num_tokens(
+            self.kv_cache_config,
+            self.routed_experts_attn_gid,
+            decode_context_parallel_size=dcp_size,
+            prefill_context_parallel_size=pcp_size,
+        )
 
         routed_experts_capturer.init_buffer(
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
