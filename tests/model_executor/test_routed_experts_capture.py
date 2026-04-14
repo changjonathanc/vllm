@@ -11,8 +11,15 @@ from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
+    get_routed_experts_buffer_num_tokens,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -241,3 +248,61 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises():
     ):
         capturer.capture(layer_id=0, topk_ids=topk)
     assert capturer._device_buffer[0, 0, 0].item() == -1
+
+
+def test_routed_experts_buffer_uses_global_attention_slot_space():
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1024,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["attn"],
+                kv_cache_spec=FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=8,
+                    head_size=128,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                layer_names=["sw"],
+                kv_cache_spec=ChunkedLocalAttentionSpec(
+                    block_size=32,
+                    num_kv_heads=8,
+                    head_size=128,
+                    dtype=torch.float16,
+                    attention_chunk_size=4096,
+                ),
+            ),
+        ],
+    )
+
+    assert get_routed_experts_buffer_num_tokens(
+        kv_cache_config,
+        0,
+    ) == 1024 * 16
+
+
+def test_routed_experts_buffer_scales_with_context_parallel_world_size():
+    kv_cache_config = KVCacheConfig(
+        num_blocks=256,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["attn"],
+                kv_cache_spec=FullAttentionSpec(
+                    block_size=32,
+                    num_kv_heads=8,
+                    head_size=128,
+                    dtype=torch.float16,
+                ),
+            ),
+        ],
+    )
+
+    assert get_routed_experts_buffer_num_tokens(
+        kv_cache_config,
+        0,
+        decode_context_parallel_size=2,
+        prefill_context_parallel_size=3,
+    ) == 256 * 32 * 6

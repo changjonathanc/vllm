@@ -21,6 +21,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,35 @@ _BUFFER_PREFIX = "vllm_routed_experts_buffer"
 # Global singleton instances
 _global_experts_capturer: RoutedExpertsCapturer | None = None
 _global_experts_reader: RoutedExpertsReader | None = None
+
+
+def get_routed_experts_buffer_num_tokens(
+    kv_cache_config: KVCacheConfig,
+    attention_kv_cache_gid: int,
+    *,
+    decode_context_parallel_size: int = 1,
+    prefill_context_parallel_size: int = 1,
+) -> int:
+    """Return the shared-memory extent needed for routed-experts slot IDs.
+
+    Routed experts are read back using attention slot IDs of the form
+    ``block_id * block_size + offset``. The block IDs come from the global
+    block pool, so in hybrid KV-cache layouts they are not bounded by the
+    attention group's share of the pool.
+    """
+
+    attn_group = kv_cache_config.kv_cache_groups[attention_kv_cache_gid]
+    if not isinstance(attn_group.kv_cache_spec, AttentionSpec):
+        raise TypeError(
+            "routed experts buffer requires an attention KV cache group, got "
+            f"{type(attn_group.kv_cache_spec).__name__}"
+        )
+
+    max_num_kv_tokens = kv_cache_config.num_blocks * attn_group.kv_cache_spec.block_size
+    cp_world_size = decode_context_parallel_size * prefill_context_parallel_size
+    if cp_world_size > 1:
+        max_num_kv_tokens *= cp_world_size
+    return max_num_kv_tokens
 
 
 @contextmanager
